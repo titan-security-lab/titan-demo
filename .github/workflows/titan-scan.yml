@@ -32,7 +32,6 @@ jobs:
             > titan_results.txt 2>&1 || true
           
           echo "✅ TITAN scan completed"
-          cat titan_results.txt
 
       - name: Parse Results to CSV
         continue-on-error: true
@@ -122,9 +121,9 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           
           if [ -f counts.txt ]; then
-            read TOTAL < <(sed -n '1p' counts.txt)
-            read VULN < <(sed -n '2p' counts.txt)
-            read SAFE < <(sed -n '3p' counts.txt)
+            TOTAL=$(sed -n '1p' counts.txt)
+            VULN=$(sed -n '2p' counts.txt)
+            SAFE=$(sed -n '3p' counts.txt)
           else
             TOTAL=0
             VULN=0
@@ -135,4 +134,4 @@ jobs:
           echo "- **Vulnerabilities Found:** 🔴 $VULN" >> $GITHUB_STEP_SUMMARY
           echo "- **Safe Functions:** ✅ $SAFE" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "📊 Download **titan-scan-results.zip** from artifacts below (includes CSV + raw output)" >> $GITHUB_STEP_SUMMARY
+          echo "📊 Download **titan-scan-results.zip** from artifacts (includes CSV + raw output)" >> $GITHUB_STEP_SUMMARY
