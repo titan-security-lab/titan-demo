@@ -32,11 +32,83 @@ jobs:
             > titan_results.txt 2>&1 || true
           
           echo "✅ TITAN scan completed"
-          cat titan_results.txt
 
-      - name: Upload Results
+      - name: Parse Results to CSV
+        run: |
+          # Extract findings data from the raw output
+          grep '"findings":\[' titan_results.txt | sed 's/.*"findings":\[/[/' | sed 's/\].*$/]/' > findings.json || echo "[]" > findings.json
+          
+          # Create CSV header
+          echo "file_path,function_name,severity,score,prediction,confidence,vulnerable,message" > titan_results.csv
+          
+          # Parse JSON and convert to CSV using Python
+          python3 << 'PYTHON'
+          import json
+          import csv
+          import sys
+          
+          try:
+              with open('findings.json', 'r') as f:
+                  findings = json.load(f)
+              
+              with open('titan_results.csv', 'a', newline='', encoding='utf-8') as csvfile:
+                  writer = csv.writer(csvfile, quoting=csv.QUOTE_ALL)
+                  
+                  for finding in findings:
+                      # Clean up the message
+                      message = finding.get('message', '').replace('\n', ' ').replace('"', "'")
+                      if len(message) > 200:
+                          message = message[:200] + "..."
+                      
+                      writer.writerow([
+                          finding.get('file_path', 'N/A'),
+                          finding.get('function_name', 'N/A'),
+                          finding.get('severity', 'N/A'),
+                          finding.get('score', 'N/A'),
+                          finding.get('prediction', 'N/A'),
+                          finding.get('raw_model', {}).get('confidence_percent', 'N/A'),
+                          'Yes' if finding.get('prediction') == 1 else 'No',
+                          message
+                      ])
+              
+              print("✅ CSV file created successfully")
+              
+          except Exception as e:
+              print(f"❌ Error creating CSV: {e}")
+              sys.exit(1)
+          PYTHON
+          
+          echo ""
+          echo "📄 CSV Preview:"
+          head -20 titan_results.csv
+
+      - name: Upload Raw Results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: titan-scan-results
+          name: titan-scan-raw
           path: titan_results.txt
+
+      - name: Upload CSV Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: titan-scan-csv
+          path: titan_results.csv
+
+      - name: Display Summary
+        if: always()
+        run: |
+          echo "## TITAN Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Count vulnerabilities
+          VULN_COUNT=$(grep -c '"prediction":1' findings.json || echo "0")
+          SAFE_COUNT=$(grep -c '"prediction":0' findings.json || echo "0")
+          TOTAL_COUNT=$((VULN_COUNT + SAFE_COUNT))
+          
+          echo "- **Total Functions Scanned:** $TOTAL_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "- **Vulnerabilities Found:** 🔴 $VULN_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "- **Safe Functions:** ✅ $SAFE_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📊 Download the CSV report from the artifacts section below." >> $GITHUB_STEP_SUMMARY
