@@ -91,6 +91,30 @@ jobs:
               match = pattern.search(text or "")
               return match.group(1).strip() if match else None
           
+          def extract_reasoning(message):
+              """
+              Extract reasoning from message - try multiple strategies
+              """
+              if not message:
+                  return None
+              
+              # Strategy 1: Extract content between <thinking> tags
+              thinking = extract_between(message, "<thinking>", "</thinking>")
+              if thinking:
+                  return thinking.strip()
+              
+              # Strategy 2: Extract everything before <output> tag
+              output_match = re.search(r'(.*?)<output>', message, re.DOTALL)
+              if output_match:
+                  reasoning = output_match.group(1).strip()
+                  # Remove any remaining XML-like tags
+                  reasoning = re.sub(r'<[^>]+>', '', reasoning)
+                  return reasoning.strip()
+              
+              # Strategy 3: If no tags, return the whole message (cleaned)
+              cleaned = re.sub(r'<[^>]+>', '', message)
+              return cleaned.strip()
+          
           def extract_function_name(code):
               if not code:
                   return None
@@ -126,10 +150,12 @@ jobs:
           results = []
           for f in data_json["findings"]:
               message = f.get("message", "")
-              thinking = extract_between(message, "<thinking>", "</thinking>")
-              output_label = extract_between(message, "<output>", "</output>")
               
-              # Clean the prediction text
+              # Extract reasoning using improved method
+              reasoning = extract_reasoning(message)
+              
+              # Extract prediction
+              output_label = extract_between(message, "<output>", "</output>")
               output_label = clean_prediction_text(output_label)
               
               raw_model_data = {}
@@ -153,11 +179,13 @@ jobs:
               if len(function_body) > 500:
                   function_body = function_body[:500] + "..."
               
-              # Clean and truncate reason
-              if thinking:
-                  thinking = thinking.replace('\n', ' ').strip()
-                  if len(thinking) > 300:
-                      thinking = thinking[:300] + "..."
+              # Clean and truncate reasoning
+              if reasoning:
+                  reasoning = reasoning.replace('\n', ' ').strip()
+                  # Remove multiple spaces
+                  reasoning = re.sub(r'\s+', ' ', reasoning)
+                  if len(reasoning) > 500:
+                      reasoning = reasoning[:500] + "..."
               
               results.append({
                   "finding_id": f.get("finding_id"),
@@ -170,7 +198,7 @@ jobs:
                   "severity": f.get("severity"),
                   "model_is_vulnerable": raw_model_data.get("is_vulnerable"),
                   "confidence_percent": raw_model_data.get("confidence_percent"),
-                  "reason": thinking,
+                  "reason": reasoning,
                   "inconsistent_prediction": inconsistent
               })
           
