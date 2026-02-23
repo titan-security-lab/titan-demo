@@ -1,0 +1,43 @@
+name: TITAN Security Scan
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  titan-scan:
+    runs-on: ubuntu-latest
+    name: Scan for Vulnerabilities
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Run TITAN Vulnerability Scan
+      run: |
+        # Find all code files (C, C++, Java, Python)
+        find . -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.java" -o -name "*.py" \) > files.txt
+        
+        # Scan each file
+        while IFS= read -r file; do
+          echo "Scanning: $file"
+          
+          # Send to TITAN API
+          curl -X POST https://titan-workstation.yannai.dev/api/scan \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"code\": $(jq -Rs . < "$file"),
+              \"language\": \"auto\"
+            }" \
+            -o "result_$(basename "$file").json"
+            
+        done < files.txt
+        
+    - name: Upload scan results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: titan-scan-results
+        path: result_*.json
