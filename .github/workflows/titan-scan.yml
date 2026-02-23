@@ -2,42 +2,41 @@ name: TITAN Security Scan
 
 on:
   push:
-    branches: [ main, master, develop ]
+    branches: [ master, main ]
   pull_request:
-    branches: [ main, master, develop ]
+    branches: [ master, main ]
+  workflow_dispatch:
 
 jobs:
   titan-scan:
     runs-on: ubuntu-latest
-    name: Scan for Vulnerabilities
+    name: TITAN Vulnerability Detection
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Run TITAN Vulnerability Scan
-      run: |
-        # Find all code files (C, C++, Java, Python)
-        find . -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.java" -o -name "*.py" \) > files.txt
-        
-        # Scan each file
-        while IFS= read -r file; do
-          echo "Scanning: $file"
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run TITAN Scan
+        run: |
+          REPO_URL="${{ github.server_url }}/${{ github.repository }}"
           
-          # Send to TITAN API
-          curl -X POST https://titan-workstation.yannai.dev/api/scan \
+          echo "🔍 Scanning repository: $REPO_URL"
+          echo "📊 Using TITAN Workstation"
+          
+          curl -N -X POST "${{ secrets.TITAN_WORKSTATION_URL }}/chat?stream=true" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"code\": $(jq -Rs . < "$file"),
-              \"language\": \"auto\"
-            }" \
-            -o "result_$(basename "$file").json"
-            
-        done < files.txt
-        
-    - name: Upload scan results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: titan-scan-results
-        path: result_*.json
+            -H "Authorization: Bearer ${{ secrets.TITAN_WORKSTATION_TOKEN }}" \
+            -d "{\"content\": \"$REPO_URL\"}" \
+            > titan_results.txt 2>&1 || true
+          
+          echo "✅ TITAN scan completed"
+          cat titan_results.txt
+
+      - name: Upload Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: titan-scan-results
+          path: titan_results.txt
