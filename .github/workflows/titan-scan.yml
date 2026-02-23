@@ -18,6 +18,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install Python dependencies
+        run: |
+          pip install pandas
+
       - name: Run TITAN Scan
         run: |
           REPO_URL="${{ github.server_url }}/${{ github.repository }}"
@@ -33,77 +37,128 @@ jobs:
           
           echo "✅ TITAN scan completed"
 
-      - name: Parse Results to CSV
+      - name: Convert to CSV
         continue-on-error: true
         run: |
-          # Extract findings from the event stream
-          cat titan_results.txt | grep 'event: findings' -A 1 | grep '^data:' | sed 's/^data: //' > findings_raw.json || echo '{"findings":[]}' > findings_raw.json
-          
-          # Create CSV with Python
           python3 << 'PYTHON'
           import json
-          import csv
+          import re
+          import pandas as pd
+          
+          # ============================================================
+          # 1️⃣ Load the raw_output.txt file
+          # ============================================================
+          with open("titan_results.txt", "r", encoding="utf-8") as f:
+              raw_text = f.read()
+          
+          # ============================================================
+          # 2️⃣ Extract the findings JSON block
+          # ============================================================
+          def extract_findings_json(sse_text):
+              """
+              Extract JSON block from 'event: findings'
+              """
+              pattern = r'event:\s*findings\s*data:\s*(\{.*?\})\s*(?=\n\s*event:|\Z)'
+              match = re.search(pattern, sse_text, re.DOTALL)
+              if not match:
+                  raise ValueError("No findings event found in file.")
+              return json.loads(match.group(1))
           
           try:
-              # Read the raw findings
-              with open('findings_raw.json', 'r') as f:
-                  content = f.read().strip()
-                  if content:
-                      data = json.loads(content)
-                      findings = data.get('findings', [])
-                  else:
-                      findings = []
-              
-              # Create CSV
-              with open('titan_results.csv', 'w', newline='', encoding='utf-8') as csvfile:
-                  writer = csv.writer(csvfile)
-                  
-                  # Header
-                  writer.writerow([
-                      'File Path',
-                      'Function Name', 
-                      'Severity',
-                      'Score',
-                      'Prediction',
-                      'Confidence',
-                      'Vulnerable',
-                      'Summary'
-                  ])
-                  
-                  # Data rows
-                  for f in findings:
-                      message = f.get('message', '')[:150].replace('\n', ' ').replace('"', "'")
-                      
-                      writer.writerow([
-                          f.get('file_path', 'N/A'),
-                          f.get('function_name', 'N/A'),
-                          f.get('severity', 'N/A'),
-                          f"{f.get('score', 0):.2f}",
-                          f.get('prediction', 'N/A'),
-                          f.get('raw_model', {}).get('confidence_percent', 'N/A'),
-                          '🔴 Yes' if f.get('prediction') == 1 else '✅ No',
-                          message + '...' if len(f.get('message', '')) > 150 else message
-                      ])
-              
-              print(f"✅ CSV created with {len(findings)} findings")
-              
-              # Save count for summary
-              with open('counts.txt', 'w') as c:
-                  vuln = sum(1 for f in findings if f.get('prediction') == 1)
-                  safe = sum(1 for f in findings if f.get('prediction') == 0)
-                  c.write(f"{len(findings)}\n{vuln}\n{safe}")
-              
-          except Exception as e:
-              print(f"⚠️  CSV creation had an issue: {e}")
-              # Create empty CSV on error
-              with open('titan_results.csv', 'w') as f:
-                  f.write('File Path,Function Name,Severity,Score,Prediction,Confidence,Vulnerable,Summary\n')
+              data_json = extract_findings_json(raw_text)
+          except ValueError as e:
+              print(f"❌ {e}")
+              # Create empty CSV
+              df = pd.DataFrame(columns=[
+                  'finding_id', 'file_path', 'function_name', 'function_body',
+                  'prediction_binary', 'prediction_text', 'score', 'severity',
+                  'model_is_vulnerable', 'confidence_percent', 'reason',
+                  'inconsistent_prediction'
+              ])
+              df.to_csv('titan_results.csv', index=False)
               with open('counts.txt', 'w') as c:
                   c.write("0\n0\n0")
-          PYTHON
+              exit(0)
           
-          echo "📄 CSV Preview:"
-          cat titan_results.csv
+          # ============================================================
+          # 3️⃣ Helper functions
+          # ============================================================
+          def extract_between(text, start_tag, end_tag):
+              pattern = re.compile(
+                  re.escape(start_tag) + r"(.*?)" + re.escape(end_tag),
+                  re.DOTALL
+              )
+              match = pattern.search(text or "")
+              return match.group(1).strip() if match else None
+          
+          def extract_function_name(code):
+              if not code:
+                  return None
+              java_match = re.search(
+                  r"(public|private|protected)?\s*\w+\s+(\w+)\s*\(",
+                  code
+              )
+              if java_match:
+                  return java_match.group(2)
+              py_match = re.search(r"def\s+(\w+)\s*\(", code)
+              if py_match:
+                  return py_match.group(1)
+              return None
+          
+          # ============================================================
+          # 4️⃣ Process findings
+          # ============================================================
+          results = []
+          for f in data_json["findings"]:
+              message = f.get("message", "")
+              thinking = extract_between(message, "<thinking>", "</thinking>")
+              output_label = extract_between(message, "<output>", "</output>")
+              
+              raw_model_data = {}
+              try:
+                  raw_model_data = json.loads(f.get("raw_model", "{}"))
+              except:
+                  pass
+              
+              function_name = f.get("function_name")
+              if not function_name:
+                  function_name = extract_function_name(f.get("function_code", ""))
+              
+              inconsistent = (
+                  (f.get("prediction") == 1 and output_label == "SAFE") or
+                  (f.get("prediction") == 0 and output_label == "VULNERABLE")
+              )
+              
+              results.append({
+                  "finding_id": f.get("finding_id"),
+                  "file_path": f.get("file_path"),
+                  "function_name": function_name,
+                  "function_body": f.get("function_code"),
+                  "prediction_binary": f.get("prediction"),
+                  "prediction_text": output_label,
+                  "score": f.get("score"),
+                  "severity": f.get("severity"),
+                  "model_is_vulnerable": raw_model_data.get("is_vulnerable"),
+                  "confidence_percent": raw_model_data.get("confidence_percent"),
+                  "reason": thinking,
+                  "inconsistent_prediction": inconsistent
+              })
+          
+          df = pd.DataFrame(results)
+          df.to_csv('titan_results.csv', index=False)
+          
+          # Save counts
+          vuln = len(df[df['prediction_binary'] == 1])
+          safe = len(df[df['prediction_binary'] == 0])
+          total = len(df)
+          
+          with open('counts.txt', 'w') as c:
+              c.write(f"{total}\n{vuln}\n{safe}")
+          
+          print(f"✅ CSV created with {total} findings ({vuln} vulnerable, {safe} safe)")
+          print(f"\n📄 CSV Preview:")
+          print(df[['file_path', 'function_name', 'severity', 'score', 'prediction_text']].to_string())
+          PYTHON
 
       - name: Upload Results
         uses: actions/upload-artifact@v4
@@ -134,4 +189,8 @@ jobs:
           echo "- **Vulnerabilities Found:** 🔴 $VULN" >> $GITHUB_STEP_SUMMARY
           echo "- **Safe Functions:** ✅ $SAFE" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "📊 Download **titan-scan-results.zip** from artifacts (includes CSV + raw output)" >> $GITHUB_STEP_SUMMARY
+          echo "📊 Download **titan-scan-results.zip** from artifacts below" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Files Included:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`titan_results.txt\` - Raw scan output" >> $GITHUB_STEP_SUMMARY
+          echo "- \`titan_results.csv\` - Structured results with all fields" >> $GITHUB_STEP_SUMMARY
