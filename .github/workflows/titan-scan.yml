@@ -105,6 +105,21 @@ jobs:
                   return py_match.group(1)
               return None
           
+          def clean_prediction_text(text):
+              """
+              Clean up prediction text to extract just VULNERABLE or SAFE
+              """
+              if not text:
+                  return None
+              # Remove XML-like tags
+              text = re.sub(r'<[^>]+>', '', text)
+              # Extract VULNERABLE or SAFE
+              if 'VULNERABLE' in text.upper():
+                  return 'VULNERABLE'
+              elif 'SAFE' in text.upper():
+                  return 'SAFE'
+              return text.strip()
+          
           # ============================================================
           # 4️⃣ Process findings
           # ============================================================
@@ -113,6 +128,9 @@ jobs:
               message = f.get("message", "")
               thinking = extract_between(message, "<thinking>", "</thinking>")
               output_label = extract_between(message, "<output>", "</output>")
+              
+              # Clean the prediction text
+              output_label = clean_prediction_text(output_label)
               
               raw_model_data = {}
               try:
@@ -124,19 +142,31 @@ jobs:
               if not function_name:
                   function_name = extract_function_name(f.get("function_code", ""))
               
+              # Check for inconsistent predictions
               inconsistent = (
                   (f.get("prediction") == 1 and output_label == "SAFE") or
                   (f.get("prediction") == 0 and output_label == "VULNERABLE")
               )
               
+              # Truncate function body for readability
+              function_body = f.get("function_code", "")
+              if len(function_body) > 500:
+                  function_body = function_body[:500] + "..."
+              
+              # Clean and truncate reason
+              if thinking:
+                  thinking = thinking.replace('\n', ' ').strip()
+                  if len(thinking) > 300:
+                      thinking = thinking[:300] + "..."
+              
               results.append({
                   "finding_id": f.get("finding_id"),
                   "file_path": f.get("file_path"),
                   "function_name": function_name,
-                  "function_body": f.get("function_code"),
+                  "function_body": function_body,
                   "prediction_binary": f.get("prediction"),
                   "prediction_text": output_label,
-                  "score": f.get("score"),
+                  "score": round(f.get("score", 0), 4),
                   "severity": f.get("severity"),
                   "model_is_vulnerable": raw_model_data.get("is_vulnerable"),
                   "confidence_percent": raw_model_data.get("confidence_percent"),
@@ -145,6 +175,24 @@ jobs:
               })
           
           df = pd.DataFrame(results)
+          
+          # Reorder columns for better readability
+          column_order = [
+              'finding_id',
+              'file_path',
+              'function_name',
+              'prediction_text',
+              'severity',
+              'score',
+              'confidence_percent',
+              'prediction_binary',
+              'model_is_vulnerable',
+              'inconsistent_prediction',
+              'reason',
+              'function_body'
+          ]
+          df = df[column_order]
+          
           df.to_csv('titan_results.csv', index=False)
           
           # Save counts
@@ -157,7 +205,7 @@ jobs:
           
           print(f"✅ CSV created with {total} findings ({vuln} vulnerable, {safe} safe)")
           print(f"\n📄 CSV Preview:")
-          print(df[['file_path', 'function_name', 'severity', 'score', 'prediction_text']].to_string())
+          print(df[['file_path', 'function_name', 'prediction_text', 'severity', 'score']].to_string())
           PYTHON
 
       - name: Upload Results
