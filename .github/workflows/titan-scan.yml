@@ -22,6 +22,15 @@ jobs:
         run: |
           pip install pandas
 
+      - name: Set Output Filenames
+        id: filenames
+        run: |
+          REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          DATETIME=$(date -u +"%Y-%m-%d_%H-%M-%S")
+          echo "repo_name=${REPO_NAME}" >> $GITHUB_OUTPUT
+          echo "datetime=${DATETIME}" >> $GITHUB_OUTPUT
+          echo "prefix=${REPO_NAME}_${DATETIME}" >> $GITHUB_OUTPUT
+
       - name: Run TITAN Scan
         run: |
           REPO_URL="${{ github.server_url }}/${{ github.repository }}"
@@ -45,19 +54,10 @@ jobs:
           import re
           import pandas as pd
           
-          # ============================================================
-          # 1️⃣ Load the raw_output.txt file
-          # ============================================================
           with open("titan_results.txt", "r", encoding="utf-8") as f:
               raw_text = f.read()
           
-          # ============================================================
-          # 2️⃣ Extract the findings JSON block
-          # ============================================================
           def extract_findings_json(sse_text):
-              """
-              Extract JSON block from 'event: findings'
-              """
               pattern = r'event:\s*findings\s*data:\s*(\{.*?\})\s*(?=\n\s*event:|\Z)'
               match = re.search(pattern, sse_text, re.DOTALL)
               if not match:
@@ -68,7 +68,6 @@ jobs:
               data_json = extract_findings_json(raw_text)
           except ValueError as e:
               print(f"❌ {e}")
-              # Create empty CSV
               df = pd.DataFrame(columns=[
                   'finding_id', 'file_path', 'function_name', 'function_body',
                   'prediction_binary', 'prediction_text', 'score', 'severity',
@@ -77,12 +76,9 @@ jobs:
               ])
               df.to_csv('titan_results.csv', index=False)
               with open('counts.txt', 'w') as c:
-                  c.write("0\n0\n0")
+                  c.write("0\n0\n0\n0\n0\n0")
               exit(0)
           
-          # ============================================================
-          # 3️⃣ Helper functions
-          # ============================================================
           def extract_between(text, start_tag, end_tag):
               pattern = re.compile(
                   re.escape(start_tag) + r"(.*?)" + re.escape(end_tag),
@@ -92,69 +88,47 @@ jobs:
               return match.group(1).strip() if match else None
           
           def extract_reasoning(message):
-              """
-              Extract reasoning from message - try multiple strategies
-              """
               if not message:
                   return None
-              
-              # Strategy 1: Extract content between <thinking> tags
               thinking = extract_between(message, "<thinking>", "</thinking>")
               if thinking:
                   return thinking.strip()
-              
-              # Strategy 2: Extract everything before <output> tag
               output_match = re.search(r'(.*?)<output>', message, re.DOTALL)
               if output_match:
                   reasoning = output_match.group(1).strip()
-                  # Remove any remaining XML-like tags
                   reasoning = re.sub(r'<[^>]+>', '', reasoning)
                   return reasoning.strip()
-              
-              # Strategy 3: If no tags, return the whole message (cleaned)
               cleaned = re.sub(r'<[^>]+>', '', message)
               return cleaned.strip()
           
           def extract_function_name(code):
               if not code:
                   return None
-              java_match = re.search(
-                  r"(public|private|protected)?\s*\w+\s+(\w+)\s*\(",
-                  code
-              )
+              java_match = re.search(r"(public|private|protected)?\s*\w+\s+(\w+)\s*\(", code)
               if java_match:
                   return java_match.group(2)
               py_match = re.search(r"def\s+(\w+)\s*\(", code)
               if py_match:
                   return py_match.group(1)
+              c_match = re.search(r"\w+\s+(\w+)\s*\([^)]*\)\s*\{", code)
+              if c_match:
+                  return c_match.group(1)
               return None
           
           def clean_prediction_text(text):
-              """
-              Clean up prediction text to extract just VULNERABLE or SAFE
-              """
               if not text:
                   return None
-              # Remove XML-like tags
               text = re.sub(r'<[^>]+>', '', text)
-              # Extract VULNERABLE or SAFE
               if 'VULNERABLE' in text.upper():
                   return 'VULNERABLE'
               elif 'SAFE' in text.upper():
                   return 'SAFE'
               return text.strip()
           
-          # ============================================================
-          # 4️⃣ Process findings
-          # ============================================================
           results = []
           for f in data_json["findings"]:
               message = f.get("message", "")
-              
-              # Extract reasoning using improved method
               reasoning = extract_reasoning(message)
-              
-              # Extract prediction
               output_label = extract_between(message, "<output>", "</output>")
               output_label = clean_prediction_text(output_label)
               
@@ -168,21 +142,17 @@ jobs:
               if not function_name:
                   function_name = extract_function_name(f.get("function_code", ""))
               
-              # Check for inconsistent predictions
               inconsistent = (
                   (f.get("prediction") == 1 and output_label == "SAFE") or
                   (f.get("prediction") == 0 and output_label == "VULNERABLE")
               )
               
-              # Truncate function body for readability
               function_body = f.get("function_code", "")
               if len(function_body) > 500:
                   function_body = function_body[:500] + "..."
               
-              # Clean and truncate reasoning
               if reasoning:
                   reasoning = reasoning.replace('\n', ' ').strip()
-                  # Remove multiple spaces
                   reasoning = re.sub(r'\s+', ' ', reasoning)
                   if len(reasoning) > 500:
                       reasoning = reasoning[:500] + "..."
@@ -204,69 +174,89 @@ jobs:
           
           df = pd.DataFrame(results)
           
-          # Reorder columns for better readability
           column_order = [
-              'finding_id',
-              'file_path',
-              'function_name',
-              'prediction_text',
-              'severity',
-              'score',
-              'confidence_percent',
-              'prediction_binary',
-              'model_is_vulnerable',
-              'inconsistent_prediction',
-              'reason',
-              'function_body'
+              'finding_id', 'file_path', 'function_name', 'prediction_text',
+              'severity', 'score', 'confidence_percent', 'prediction_binary',
+              'model_is_vulnerable', 'inconsistent_prediction', 'reason', 'function_body'
           ]
           df = df[column_order]
-          
           df.to_csv('titan_results.csv', index=False)
           
-          # Save counts
           vuln = len(df[df['prediction_binary'] == 1])
           safe = len(df[df['prediction_binary'] == 0])
           total = len(df)
+          critical = len(df[(df['prediction_binary'] == 1) & (df['severity'] == 'CRITICAL')])
+          high = len(df[(df['prediction_binary'] == 1) & (df['severity'] == 'HIGH')])
+          medium = len(df[(df['prediction_binary'] == 1) & (df['severity'] == 'MEDIUM')])
           
           with open('counts.txt', 'w') as c:
-              c.write(f"{total}\n{vuln}\n{safe}")
+              c.write(f"{total}\n{vuln}\n{safe}\n{critical}\n{high}\n{medium}")
           
-          print(f"✅ CSV created with {total} findings ({vuln} vulnerable, {safe} safe)")
+          print(f"✅ CSV created with {total} findings")
+          print(f"   - Vulnerabilities: {vuln}")
+          print(f"   - Safe: {safe}")
           print(f"\n📄 CSV Preview:")
           print(df[['file_path', 'function_name', 'prediction_text', 'severity', 'score']].to_string())
           PYTHON
+
+      - name: Rename Output Files
+        run: |
+          PREFIX="${{ steps.filenames.outputs.prefix }}"
+          
+          # Rename files with repo name and timestamp
+          mv titan_results.txt "${PREFIX}_scan.txt"
+          mv titan_results.csv "${PREFIX}_scan.csv"
+          
+          echo "📁 Files renamed:"
+          echo "   - ${PREFIX}_scan.txt"
+          echo "   - ${PREFIX}_scan.csv"
 
       - name: Upload Results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: titan-scan-results
+          name: titan-scan-results-${{ steps.filenames.outputs.prefix }}
           path: |
-            titan_results.txt
-            titan_results.csv
+            ${{ steps.filenames.outputs.prefix }}_scan.txt
+            ${{ steps.filenames.outputs.prefix }}_scan.csv
 
       - name: Display Summary
         if: always()
         run: |
-          echo "## 🔍 TITAN Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## 🔍 TITAN Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Repository:** ${{ steps.filenames.outputs.repo_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Scan Date:** ${{ steps.filenames.outputs.datetime }} UTC" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           if [ -f counts.txt ]; then
             TOTAL=$(sed -n '1p' counts.txt)
             VULN=$(sed -n '2p' counts.txt)
             SAFE=$(sed -n '3p' counts.txt)
+            CRITICAL=$(sed -n '4p' counts.txt)
+            HIGH=$(sed -n '5p' counts.txt)
+            MEDIUM=$(sed -n '6p' counts.txt)
           else
             TOTAL=0
             VULN=0
             SAFE=0
+            CRITICAL=0
+            HIGH=0
+            MEDIUM=0
           fi
           
+          echo "### Summary" >> $GITHUB_STEP_SUMMARY
           echo "- **Total Functions Scanned:** $TOTAL" >> $GITHUB_STEP_SUMMARY
-          echo "- **Vulnerabilities Found:** 🔴 $VULN" >> $GITHUB_STEP_SUMMARY
+          echo "- **Vulnerabilities Found:** 🛡️ $VULN" >> $GITHUB_STEP_SUMMARY
           echo "- **Safe Functions:** ✅ $SAFE" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "📊 Download **titan-scan-results.zip** from artifacts below" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Files Included:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`titan_results.txt\` - Raw scan output" >> $GITHUB_STEP_SUMMARY
-          echo "- \`titan_results.csv\` - Structured results with all fields" >> $GITHUB_STEP_SUMMARY
+          
+          if [ $VULN -gt 0 ]; then
+            echo "### Vulnerability Breakdown" >> $GITHUB_STEP_SUMMARY
+            [ $CRITICAL -gt 0 ] && echo "- 🔴 **CRITICAL:** $CRITICAL" >> $GITHUB_STEP_SUMMARY
+            [ $HIGH -gt 0 ] && echo "- 🟠 **HIGH:** $HIGH" >> $GITHUB_STEP_SUMMARY
+            [ $MEDIUM -gt 0 ] && echo "- 🟡 **MEDIUM:** $MEDIUM" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "📊 Download **titan-scan-results-${{ steps.filenames.outputs.prefix }}.zip**" >> $GITHUB_STEP_SUMMARY
